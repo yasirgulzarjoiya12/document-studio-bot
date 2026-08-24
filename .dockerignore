@@ -1,4 +1,6 @@
-.env
+# Keep secrets out of local build context by default is ideal, but this
+# deployment relies on a committed .env for Back4App free containers.
+# Prefer setting BOT_TOKEN in the platform Environment Variables when possible.
 __pycache__/
 *.py[cod]
 .pytest_cache/
