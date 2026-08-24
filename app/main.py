@@ -17,23 +17,18 @@ from telegram.ext import (
 
 from .config import Config
 from .database import Database
-from .handlers.admin import admin, broadcast, jobs, maintenance, queue, stats, users
-from .handlers.callbacks import callback_router, on_complete, on_failed, on_progress
-from .handlers.errors import error_handler
-from .handlers.files import receive_document, receive_photo, receive_text
-from .handlers.misc import about, cancel, history, privacy, report, settings, status, terms
-from .handlers.start import help_command, menu, start
 from .health import HealthServer
-from .services.cleanup import CleanupService
-from .services.job_manager import JobManager
-from .services.rate_limit import RateLimiter
 from .utils.logging import setup_logging
-
 
 log = logging.getLogger(__name__)
 
 
 async def post_init(application: Application) -> None:
+    from .handlers.callbacks import on_complete, on_failed, on_progress
+    from .services.cleanup import CleanupService
+    from .services.job_manager import JobManager
+    from .services.rate_limit import RateLimiter
+
     config: Config = application.bot_data["config"]
     db: Database = application.bot_data["db"]
     await db.connect()
@@ -79,6 +74,13 @@ async def post_shutdown(application: Application) -> None:
 
 
 def build_application(config: Config) -> Application:
+    from .handlers.admin import admin, broadcast, jobs, maintenance, queue, stats, users
+    from .handlers.callbacks import callback_router
+    from .handlers.errors import error_handler
+    from .handlers.files import receive_document, receive_photo, receive_text
+    from .handlers.misc import about, cancel, history, privacy, report, settings, status, terms
+    from .handlers.start import help_command, menu, start
+
     db = Database(config.database_path)
     application = (
         ApplicationBuilder()
@@ -120,7 +122,6 @@ def build_application(config: Config) -> Application:
 
 
 def run() -> None:
-    """Start health server first (platform probes), then Telegram polling."""
     from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
 
     config = Config.from_env()
@@ -146,7 +147,17 @@ def run() -> None:
     backoff = 5
     max_backoff = 60
     while True:
-        application = build_application(config)
+        try:
+            application = build_application(config)
+        except Exception:
+            log.exception(
+                "Failed to build application (missing module?). Health still up. Retrying in %s s...",
+                backoff,
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+            continue
+
         if health is not None:
             application.bot_data["health"] = health
         try:
@@ -160,19 +171,14 @@ def run() -> None:
             break
         except Conflict:
             log.error(
-                "Telegram Conflict: another instance is already polling with this BOT_TOKEN. "
-                "Stop the other process then restart. Retrying in %s seconds...",
+                "Telegram Conflict: another instance is polling this BOT_TOKEN. Retrying in %s s...",
                 backoff,
             )
         except (NetworkError, TimedOut) as exc:
-            log.warning(
-                "Network error during polling (%s). Retrying in %s seconds...",
-                exc,
-                backoff,
-            )
+            log.warning("Network error (%s). Retrying in %s s...", exc, backoff)
         except RetryAfter as exc:
             wait = max(int(exc.retry_after) + 1, backoff)
-            log.warning("Telegram flood control. Sleeping %s seconds...", wait)
+            log.warning("Flood control. Sleeping %s s...", wait)
             time.sleep(wait)
             backoff = min(backoff * 2, max_backoff)
             continue
@@ -180,19 +186,14 @@ def run() -> None:
             log.info("Interrupted by user.")
             break
         except Exception:
-            log.exception(
-                "Unexpected fatal error in run_polling. Retrying in %s seconds...",
-                backoff,
-            )
+            log.exception("Fatal polling error. Retrying in %s s...", backoff)
         time.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
 
     if health is not None:
         try:
             loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(health.stop())
-            else:
+            if not loop.is_running():
                 loop.run_until_complete(health.stop())
         except Exception:
             pass
