@@ -8,7 +8,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
     PORT=8080
 
-# Runtime packages for OCR and file validation (noninteractive to avoid debconf noise)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        tesseract-ocr \
@@ -30,7 +29,6 @@ RUN mkdir -p /app/data /app/downloads /app/logs /app/job-data \
 
 EXPOSE 8080
 
-# Platform (Back4App) probes :8080 almost immediately. Health binds first in bot.py.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT','8080') + '/health', timeout=3).read()" || exit 1
 
