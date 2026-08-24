@@ -31,8 +31,10 @@ RUN mkdir -p /app/data /app/downloads /app/logs /app/job-data \
 # webhook port, but the app exposes its local health endpoint for Docker/ops.
 EXPOSE 8080
 
-# Check the real health endpoint instead of merely checking that Python exists.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# Give the bot time to connect DB, start the health server, and finish Telegram
+# bootstrap. A short start-period previously caused Docker to kill the container
+# after roughly one minute of "unhealthy" probes.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT','8080') + '/health', timeout=3).read()" || exit 1
 
 # One foreground process: the actual Telegram bot.
