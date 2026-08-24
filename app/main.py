@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 
@@ -121,10 +122,60 @@ def build_application(config: Config) -> Application:
     return application
 
 
+def _start_health_early() -> HealthServer | None:
+    """Bind /health before Config so platform probes pass even if BOT_TOKEN is missing."""
+    port = int(os.getenv("PORT", "8080") or "8080")
+    enable = os.getenv("ENABLE_HEALTH", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enable:
+        return None
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        health = HealthServer(port, time.time())
+        loop.run_until_complete(health.start())
+        logging.getLogger(__name__).info("Early health server on 0.0.0.0:%s/health", port)
+        return health
+    except Exception:
+        logging.getLogger(__name__).exception("Could not start early health server")
+        return None
+
+
 def run() -> None:
     from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
 
-    config = Config.from_env()
+    # Basic console logging until Config/log dir is ready
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+    # 1) Health first — Back4App probes :8080 immediately
+    health = _start_health_early()
+
+    # 2) Wait for BOT_TOKEN in container environment (not a committed .env file)
+    backoff = 5
+    max_backoff = 60
+    config: Config | None = None
+    while config is None:
+        token = (os.getenv("BOT_TOKEN") or "").strip()
+        if not token:
+            log.error(
+                "BOT_TOKEN is missing from the container environment. "
+                "In Back4App: App Settings → Environment Variables → add BOT_TOKEN "
+                "(and optionally ADMIN_IDS). Do not rely on a .env file in the image. "
+                "Retrying in %s s...",
+                backoff,
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+            continue
+        try:
+            config = Config.from_env()
+        except Exception as exc:
+            log.error("Config error: %s — retrying in %s s...", exc, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
     setup_logging(config.log_dir, config.log_level)
     log.info(
         "Starting Document Studio bot (health=%s, port=%s)",
@@ -132,26 +183,13 @@ def run() -> None:
         config.port,
     )
 
-    health: HealthServer | None = None
-    if config.enable_health:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            health = HealthServer(config.port, time.time())
-            loop.run_until_complete(health.start())
-            log.info("Early health server bound on port %s", config.port)
-        except Exception:
-            log.exception("Could not start early health server")
-            health = None
-
     backoff = 5
-    max_backoff = 60
     while True:
         try:
             application = build_application(config)
         except Exception:
             log.exception(
-                "Failed to build application (missing module?). Health still up. Retrying in %s s...",
+                "Failed to build application. Health still up. Retrying in %s s...",
                 backoff,
             )
             time.sleep(backoff)
