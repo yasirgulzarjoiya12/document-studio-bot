@@ -109,9 +109,7 @@ class Database:
                first_name=excluded.first_name, last_seen_at=excluded.last_seen_at""",
             (user_id, chat_id, username, first_name, stamp, stamp),
         )
-        await db.execute(
-            "INSERT OR IGNORE INTO user_settings(user_id) VALUES(?)", (user_id,)
-        )
+        await db.execute("INSERT OR IGNORE INTO user_settings(user_id) VALUES(?)", (user_id,))
         await db.commit()
 
     async def get_settings(self, user_id: int) -> dict[str, Any]:
@@ -173,10 +171,7 @@ class Database:
         fields.append("updated_at=?")
         values.append(now())
         values.append(job_id)
-        await self._db().execute(
-            f"UPDATE jobs SET {', '.join(fields)} WHERE job_id=?",
-            values,
-        )
+        await self._db().execute(f"UPDATE jobs SET {', '.join(fields)} WHERE job_id=?", values)
         await self._db().commit()
 
     async def add_result(
@@ -212,8 +207,7 @@ class Database:
 
     async def personal_stats(self, user_id: int) -> dict[str, int]:
         cur = await self._db().execute(
-            "SELECT status, COUNT(*) AS c FROM jobs WHERE user_id=? GROUP BY status",
-            (user_id,),
+            "SELECT status, COUNT(*) AS c FROM jobs WHERE user_id=? GROUP BY status", (user_id,)
         )
         rows = await cur.fetchall()
         await cur.close()
@@ -225,9 +219,22 @@ class Database:
 
     async def recent_jobs(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
         cur = await self._db().execute(
-            "SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            (user_id, limit),
+            "SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, limit)
         )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def active_jobs(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        if user_id is None:
+            cur = await self._db().execute(
+                "SELECT * FROM jobs WHERE status IN ('queued','processing') ORDER BY created_at DESC LIMIT 50"
+            )
+        else:
+            cur = await self._db().execute(
+                "SELECT * FROM jobs WHERE user_id=? AND status IN ('queued','processing') ORDER BY created_at DESC",
+                (user_id,),
+            )
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -243,8 +250,7 @@ class Database:
     async def list_jobs(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
         if status:
             cur = await self._db().execute(
-                "SELECT * FROM jobs WHERE status=? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
+                "SELECT * FROM jobs WHERE status=? ORDER BY created_at DESC LIMIT ?", (status, limit)
             )
         else:
             cur = await self._db().execute(
@@ -259,13 +265,3 @@ class Database:
         rows = await cur.fetchall()
         await cur.close()
         return {row["status"]: row["c"] for row in rows}
-
-    async def delete_old_results(self, ids: list[int]) -> list[int]:
-        if not ids:
-            return []
-        placeholders = ",".join("?" * len(ids))
-        await self._db().execute(
-            f"DELETE FROM job_results WHERE id IN ({placeholders})", ids
-        )
-        await self._db().commit()
-        return ids
