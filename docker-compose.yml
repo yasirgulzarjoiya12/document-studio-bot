@@ -1,0 +1,22 @@
+services:
+  document-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENABLE_HEALTH: "true"
+    # PORT is the port used by the health server inside the container.
+    # HOST_PORT is the host port published by Docker. Keeping them separate
+    # avoids the previous ${PORT}:8080 mismatch.
+    ports:
+      - "${HOST_PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      - ./job-data:/app/job-data
+    init: true
+    stop_grace_period: 30s
