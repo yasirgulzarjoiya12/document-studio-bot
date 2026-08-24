@@ -57,6 +57,10 @@ class Config:
     log_level: str
     tesseract_cmd: str | None
 
+    @property
+    def max_file_size_bytes(self) -> int:
+        return self.max_file_size_mb * 1024 * 1024
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.getenv("BOT_TOKEN", "").strip()
