@@ -52,6 +52,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("nav:history"):
         await show_history(q, context, user.id, 0)
         return
+    if data.startswith("input:finish:"):
+        await start_job_from_context(update, context)
+        return
     if data.startswith("gallery:"):
         parts = data.split(":")
         job_id, owner, page = parts[1], int(parts[2]), int(parts[3])
@@ -96,6 +99,43 @@ async def show_gallery(q, context, job_id: str, user_id: int, page: int) -> None
             job_id, user_id, page, pages, [int(r["id"]) for r in results], True
         ),
     )
+
+
+async def start_job_from_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from ..keyboards.main import cancel_keyboard
+    from ..services import operations
+
+    op = context.user_data.get("operation")
+    inputs = list(context.user_data.get("inputs") or [])
+    params = dict(context.user_data.get("params") or {})
+    if not op or not inputs:
+        msg = update.effective_message or (
+            update.callback_query.message if update.callback_query else None
+        )
+        if msg:
+            await msg.reply_text("No files queued. Use /menu and upload again.")
+        return
+
+    config = context.application.bot_data["config"]
+    manager = context.application.bot_data["job_manager"]
+    chat = update.effective_chat
+    user = update.effective_user
+    status = await context.bot.send_message(
+        chat.id, "⏳ <b>Queued</b>\nWaiting for a worker...", parse_mode="HTML"
+    )
+
+    async def runner(job: RuntimeJob, progress):
+        return await operations.run(job, progress, config)
+
+    try:
+        job = await manager.create(
+            user.id, chat.id, op, inputs, params, status.message_id, runner
+        )
+    except RuntimeError as exc:
+        await status.edit_text(f"⚠️ {exc}")
+        return
+    context.user_data.clear()
+    await status.edit_reply_markup(reply_markup=cancel_keyboard(job.job_id, job.user_id))
 
 
 async def on_progress(job: RuntimeJob, value: int, stage: str) -> None:
