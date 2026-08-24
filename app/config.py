@@ -9,10 +9,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
 @dataclass(frozen=True)
-class Settings:
+class Config:
     bot_token: str
-    admin_ids: list[int]
+    admin_ids: frozenset[int]
     bot_name: str
     bot_description: str
     database_path: Path
@@ -39,56 +57,56 @@ class Settings:
     log_level: str
     tesseract_cmd: str | None
 
+    @classmethod
+    def from_env(cls) -> "Config":
+        token = os.getenv("BOT_TOKEN", "").strip()
+        if not token:
+            raise ValueError("BOT_TOKEN is required")
 
-def _bool(val: str | None, default: bool = False) -> bool:
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
+        raw_admins = os.getenv("ADMIN_IDS", "").strip()
+        admins: set[int] = set()
+        if raw_admins:
+            for item in raw_admins.split(","):
+                item = item.strip()
+                if item:
+                    try:
+                        admins.add(int(item))
+                    except ValueError as exc:
+                        raise ValueError("ADMIN_IDS must contain numeric Telegram IDs") from exc
 
-
-def _int_list(val: str | None) -> list[int]:
-    if not val:
-        return []
-    out = []
-    for part in val.replace(";", ",").split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.append(int(part))
-    return out
-
-
-def load_settings() -> Settings:
-    token = os.getenv("BOT_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("BOT_TOKEN is required")
-
-    base = Path(".").resolve()
-    return Settings(
-        bot_token=token,
-        admin_ids=_int_list(os.getenv("ADMIN_IDS")),
-        bot_name=os.getenv("BOT_NAME", "Document Studio").strip() or "Document Studio",
-        bot_description=os.getenv("BOT_DESCRIPTION", "Private document and image workspace").strip(),
-        database_path=base / os.getenv("DATABASE_PATH", "data/bot.sqlite3"),
-        download_dir=base / os.getenv("DOWNLOAD_DIR", "downloads"),
-        log_dir=base / os.getenv("LOG_DIR", "logs"),
-        job_data_dir=base / os.getenv("JOB_DATA_DIR", "job-data"),
-        max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "20")),
-        max_concurrent_jobs=int(os.getenv("MAX_CONCURRENT_JOBS", "2")),
-        max_jobs_per_user=int(os.getenv("MAX_JOBS_PER_USER", "1")),
-        max_queue_size=int(os.getenv("MAX_QUEUE_SIZE", "10")),
-        download_timeout=int(os.getenv("DOWNLOAD_TIMEOUT", "120")),
-        provider_timeout=int(os.getenv("PROVIDER_TIMEOUT", "60")),
-        max_retries=int(os.getenv("MAX_RETRIES", "2")),
-        rate_limit=int(os.getenv("RATE_LIMIT", "6")),
-        rate_window_seconds=int(os.getenv("RATE_WINDOW_SECONDS", "60")),
-        auto_cleanup=_bool(os.getenv("AUTO_CLEANUP"), True),
-        cleanup_after_upload=_bool(os.getenv("CLEANUP_AFTER_UPLOAD"), True),
-        cleanup_interval_seconds=int(os.getenv("CLEANUP_INTERVAL_SECONDS", "1800")),
-        result_ttl_seconds=int(os.getenv("RESULT_TTL_SECONDS", "86400")),
-        max_results_per_job=int(os.getenv("MAX_RESULTS_PER_JOB", "100")),
-        gallery_page_size=int(os.getenv("GALLERY_PAGE_SIZE", "6")),
-        port=int(os.getenv("PORT", "8080")),
-        enable_health=_bool(os.getenv("ENABLE_HEALTH"), True),
-        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        tesseract_cmd=os.getenv("TESSERACT_CMD") or None,
-    )
+        cfg = cls(
+            bot_token=token,
+            admin_ids=frozenset(admins),
+            bot_name=os.getenv("BOT_NAME", "Document Studio").strip(),
+            bot_description=os.getenv(
+                "BOT_DESCRIPTION", "Private document and image workspace"
+            ).strip(),
+            database_path=Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3")),
+            download_dir=Path(os.getenv("DOWNLOAD_DIR", "downloads")),
+            log_dir=Path(os.getenv("LOG_DIR", "logs")),
+            job_data_dir=Path(os.getenv("JOB_DATA_DIR", "job-data")),
+            max_file_size_mb=_int("MAX_FILE_SIZE_MB", 20, 1),
+            max_concurrent_jobs=_int("MAX_CONCURRENT_JOBS", 2, 1),
+            max_jobs_per_user=_int("MAX_JOBS_PER_USER", 1, 1),
+            max_queue_size=_int("MAX_QUEUE_SIZE", 10, 1),
+            download_timeout=_int("DOWNLOAD_TIMEOUT", 120, 1),
+            provider_timeout=_int("PROVIDER_TIMEOUT", 60, 1),
+            max_retries=_int("MAX_RETRIES", 2, 0),
+            rate_limit=_int("RATE_LIMIT", 6, 1),
+            rate_window_seconds=_int("RATE_WINDOW_SECONDS", 60, 1),
+            auto_cleanup=_bool("AUTO_CLEANUP", True),
+            cleanup_after_upload=_bool("CLEANUP_AFTER_UPLOAD", True),
+            cleanup_interval_seconds=_int("CLEANUP_INTERVAL_SECONDS", 1800, 30),
+            result_ttl_seconds=_int("RESULT_TTL_SECONDS", 86400, 60),
+            max_results_per_job=_int("MAX_RESULTS_PER_JOB", 100, 1),
+            gallery_page_size=_int("GALLERY_PAGE_SIZE", 6, 1),
+            port=_int("PORT", 8080, 1),
+            enable_health=_bool("ENABLE_HEALTH", True),
+            log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            tesseract_cmd=os.getenv("TESSERACT_CMD", "").strip() or None,
+        )
+        for path in (cfg.database_path.parent, cfg.download_dir, cfg.log_dir, cfg.job_data_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        if cfg.gallery_page_size > 10:
+            raise ValueError("GALLERY_PAGE_SIZE must be <= 10")
+        return cfg
