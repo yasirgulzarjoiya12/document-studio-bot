@@ -37,13 +37,20 @@ async def post_init(application: Application) -> None:
     config: Config = application.bot_data["config"]
     db: Database = application.bot_data["db"]
     await db.connect()
+
+    health: HealthServer | None = application.bot_data.get("health")
+    if health is not None:
+        health.attach_db(db)
+
     cleanup = CleanupService(config, db)
     cleanup.start()
     application.bot_data["cleanup"] = cleanup
 
     manager = JobManager(config, db)
     application.bot_data["job_manager"] = manager
-    application.bot_data["rate_limiter"] = RateLimiter(config.rate_limit, config.rate_window_seconds)
+    application.bot_data["rate_limiter"] = RateLimiter(
+        config.rate_limit, config.rate_window_seconds
+    )
 
     on_progress.app = application
     on_complete.app = application
@@ -51,22 +58,6 @@ async def post_init(application: Application) -> None:
     manager.on_progress = on_progress
     manager.on_complete = on_complete
     manager.on_failed = on_failed
-
-    if config.enable_health:
-        try:
-            health = HealthServer(db, config.port, time.time())
-            await health.start()
-            application.bot_data["health"] = health
-            log.info("Health server listening on 0.0.0.0:%s/health", config.port)
-        except OSError as exc:
-            # Port already in use or bind failure must not kill the bot.
-            log.error(
-                "Health server failed to start on port %s (%s). Bot continues without /health.",
-                config.port,
-                exc,
-            )
-        except Exception:
-            log.exception("Unexpected error starting health server; bot continues without /health.")
 
     log.info("Application initialized")
 
@@ -129,42 +120,56 @@ def build_application(config: Config) -> Application:
 
 
 def run() -> None:
-    """Start the bot with resilient polling.
-
-    Common failure modes that used to take the process down after ~1 minute:
-    - Telegram Conflict (another instance polling the same token)
-    - Transient network / TimedOut errors from getUpdates
-    - Health server bind errors (now non-fatal in post_init)
-    """
+    """Start health server first (platform probes), then Telegram polling."""
     from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
 
     config = Config.from_env()
     setup_logging(config.log_dir, config.log_level)
-    log.info("Starting Document Studio bot (health=%s, port=%s)", config.enable_health, config.port)
+    log.info(
+        "Starting Document Studio bot (health=%s, port=%s)",
+        config.enable_health,
+        config.port,
+    )
+
+    health: HealthServer | None = None
+    if config.enable_health:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            health = HealthServer(config.port, time.time())
+            loop.run_until_complete(health.start())
+            log.info("Early health server bound on port %s", config.port)
+        except Exception:
+            log.exception("Could not start early health server")
+            health = None
 
     backoff = 5
     max_backoff = 60
     while True:
         application = build_application(config)
+        if health is not None:
+            application.bot_data["health"] = health
         try:
             application.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
-                close_loop=True,
+                close_loop=False,
                 stop_signals=(signal.SIGINT, signal.SIGTERM),
             )
-            # Clean shutdown (signal) — exit the restart loop.
             log.info("Polling stopped cleanly.")
             break
         except Conflict:
             log.error(
                 "Telegram Conflict: another instance is already polling with this BOT_TOKEN. "
-                "Stop the other process (or wait for it to die) then restart. "
-                "Retrying in %s seconds...",
+                "Stop the other process then restart. Retrying in %s seconds...",
                 backoff,
             )
         except (NetworkError, TimedOut) as exc:
-            log.warning("Network error during polling (%s). Retrying in %s seconds...", exc, backoff)
+            log.warning(
+                "Network error during polling (%s). Retrying in %s seconds...",
+                exc,
+                backoff,
+            )
         except RetryAfter as exc:
             wait = max(int(exc.retry_after) + 1, backoff)
             log.warning("Telegram flood control. Sleeping %s seconds...", wait)
@@ -175,6 +180,19 @@ def run() -> None:
             log.info("Interrupted by user.")
             break
         except Exception:
-            log.exception("Unexpected fatal error in run_polling. Retrying in %s seconds...", backoff)
+            log.exception(
+                "Unexpected fatal error in run_polling. Retrying in %s seconds...",
+                backoff,
+            )
         time.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
+
+    if health is not None:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(health.stop())
+            else:
+                loop.run_until_complete(health.stop())
+        except Exception:
+            pass
