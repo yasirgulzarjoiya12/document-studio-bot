@@ -23,3 +23,10 @@ def short_dt(value: str | None) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return value[:16]
+
+
+def safe_text(text: str) -> str:
+    """Drop UTF-16 surrogates so Telegram HTTP never raises UnicodeEncodeError."""
+    if not text:
+        return text
+    return "".join(ch for ch in text if not (0xD800 <= ord(ch) <= 0xDFFF))

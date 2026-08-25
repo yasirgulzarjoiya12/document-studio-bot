@@ -94,7 +94,10 @@ class JobManager:
                 raise asyncio.CancelledError
             await self.db.set_job(job.job_id, status=JobStatus.PROCESSING, progress=value)
             if self.on_progress:
-                await self.on_progress(job, value, stage)
+                try:
+                    await self.on_progress(job, value, stage)
+                except Exception:
+                    log.debug("progress notify failed", exc_info=True)
 
         try:
             await self.db.set_job(job.job_id, status=JobStatus.PROCESSING, progress=1)
@@ -117,16 +120,27 @@ class JobManager:
                     job.job_id, status=JobStatus.COMPLETED, progress=100, output_count=len(valid)
                 )
                 if self.on_complete:
-                    await self.on_complete(job, valid)
+                    try:
+                        await self.on_complete(job, valid)
+                    except Exception:
+                        log.exception("Job %s completed but notify failed", job.job_id)
         except asyncio.CancelledError:
             await self.db.set_job(job.job_id, status=JobStatus.CANCELLED, error="Cancelled")
             if self.on_failed:
-                await self.on_failed(job, "Cancelled.")
+                try:
+                    await self.on_failed(job, "Cancelled.")
+                except Exception:
+                    log.debug("cancel notify failed", exc_info=True)
         except Exception as exc:
             log.exception("Job %s failed", job.job_id)
             await self.db.set_job(job.job_id, status=JobStatus.FAILED, error=str(exc))
             if self.on_failed:
-                await self.on_failed(job, str(exc), retryable=not isinstance(exc, ValidationError))
+                try:
+                    await self.on_failed(
+                        job, str(exc), retryable=not isinstance(exc, ValidationError)
+                    )
+                except Exception:
+                    log.debug("fail notify failed", exc_info=True)
         finally:
             async with self._lock:
                 self.runtime.pop(job.job_id, None)

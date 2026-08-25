@@ -1,36 +1,28 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import math
-import shutil
 import zipfile
 from pathlib import Path
 
-from telegram import InputMediaPhoto, Update
-from telegram.constants import ChatAction
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..config import Config
 from ..database import Database
 from ..keyboards.admin import admin_keyboard
-from ..keyboards.main import main_menu, navigation, result_keyboard, cancel_keyboard, retry_keyboard
+from ..keyboards.main import cancel_keyboard, main_menu, navigation, result_keyboard, retry_keyboard
 from ..keyboards.settings import settings_keyboard
-from ..models import JobStatus
 from ..services.job_manager import RuntimeJob
-from ..services.validation import validate_file, ValidationError
-from ..utils.formatting import human_bytes, short_dt
+from ..services.validation import ValidationError, validate_file
+from ..utils.formatting import safe_text
 from ..utils.security import safe_filename
 
 log = logging.getLogger(__name__)
 
 
-def get_owner(data: str) -> int | None:
-    try:
-        return int(data.rsplit(":", 1)[1])
-    except (ValueError, IndexError):
-        return None
+async def _edit(q, text: str, **kwargs) -> None:
+    await q.edit_message_text(safe_text(text), **kwargs)
 
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -48,16 +40,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "nav:home":
         context.user_data.clear()
         await q.answer()
-        await q.edit_message_text(
-            "\ud83c\udfe0 <b>Document Studio</b>\n\nChoose an operation:",
+        await _edit(
+            q,
+            "<b>Document Studio</b>\n\nChoose an operation:",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
         return
     if data.startswith("nav:help"):
         await q.answer()
-        await q.edit_message_text(
-            "\u2139\ufe0f <b>Help</b>\n\nChoose a tool, upload valid files, wait for processing.\n"
+        await _edit(
+            q,
+            "<b>Help</b>\n\nChoose a tool, upload valid files, wait for processing.\n"
             "Every result is checked before delivery.",
             parse_mode="HTML",
             reply_markup=navigation(),
@@ -66,8 +60,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("nav:stats"):
         await q.answer()
         stats = await context.application.bot_data["db"].personal_stats(user.id)
-        await q.edit_message_text(
-            f"\ud83d\udcca <b>Your statistics</b>\n\n"
+        await _edit(
+            q,
+            f"<b>Your statistics</b>\n\n"
             f"Total: {stats.get('total', 0)}\nCompleted: {stats.get('completed', 0)}\n"
             f"Failed: {stats.get('failed', 0)}\nCancelled: {stats.get('cancelled', 0)}",
             parse_mode="HTML",
@@ -77,7 +72,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("nav:settings"):
         await q.answer()
         s = await context.application.bot_data["db"].get_settings(user.id)
-        await q.edit_message_text("\u2699\ufe0f <b>Settings</b>", parse_mode="HTML", reply_markup=settings_keyboard(s))
+        await _edit(q, "<b>Settings</b>", parse_mode="HTML", reply_markup=settings_keyboard(s))
         return
     if data.startswith("nav:history"):
         await q.answer()
@@ -98,15 +93,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         manager = context.application.bot_data["job_manager"]
         ok = await manager.cancel(job_id, user.id)
-        await q.edit_message_text("Cancelled." if ok else "Nothing to cancel.")
+        await _edit(q, "Cancelled." if ok else "Nothing to cancel.")
         return
     if data.startswith("job:retry:"):
         await q.answer()
         parts = data.split(":")
-        job_id, owner = parts[2], int(parts[3])
+        owner = int(parts[3])
         if owner != user.id:
             return
-        await q.edit_message_text("Use /menu and upload again to retry.")
+        await _edit(q, "Use /menu and upload again to retry.")
         return
     if data.startswith("gallery:"):
         await q.answer()
@@ -117,7 +112,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await show_gallery(q, context, job_id, user.id, page)
         return
     if data.startswith("result:zip:"):
-        await q.answer("Preparing archive\u2026")
+        await q.answer("Preparing archive...")
         parts = data.split(":")
         job_id, owner = parts[2], int(parts[3])
         if owner != user.id:
@@ -134,7 +129,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if data.startswith("admin:"):
         await q.answer()
-        await q.edit_message_text("Admin", reply_markup=admin_keyboard())
+        await _edit(q, "Admin", reply_markup=admin_keyboard())
         return
     await q.answer("Unknown action.", show_alert=True)
 
@@ -161,10 +156,10 @@ async def show_history(q, context, user_id: int, page: int) -> None:
     db: Database = context.application.bot_data["db"]
     rows = await db.recent_jobs(user_id, 10)
     if not rows:
-        await q.edit_message_text("No history yet.", reply_markup=navigation())
+        await _edit(q, "No history yet.", reply_markup=navigation())
         return
-    text = "\n".join(f"{r['job_id'][:8]} \u2022 {r['operation']} \u2022 {r['status']}" for r in rows)
-    await q.edit_message_text(f"\ud83d\udcda <b>History</b>\n\n{text}", parse_mode="HTML", reply_markup=navigation())
+    text = "\n".join(f"{r['job_id'][:8]} | {r['operation']} | {r['status']}" for r in rows)
+    await _edit(q, f"<b>History</b>\n\n{text}", parse_mode="HTML", reply_markup=navigation())
 
 
 async def show_gallery(q, context, job_id: str, user_id: int, page: int) -> None:
@@ -175,10 +170,11 @@ async def show_gallery(q, context, job_id: str, user_id: int, page: int) -> None
     total_rows = await db.get_results(job_id, 1000, 0)
     pages = max(1, (len(total_rows) + page_size - 1) // page_size)
     if not results:
-        await q.edit_message_text("No results.", reply_markup=navigation())
+        await _edit(q, "No results.", reply_markup=navigation())
         return
-    await q.edit_message_text(
-        f"\ud83d\uddbc <b>Results</b>\nPage {page + 1}/{pages} \u2022 {len(total_rows)} file(s)",
+    await _edit(
+        q,
+        f"<b>Results</b>\nPage {page + 1}/{pages} | {len(total_rows)} file(s)",
         parse_mode="HTML",
         reply_markup=result_keyboard(
             job_id, user_id, page, pages, [int(r["id"]) for r in results], True
@@ -189,32 +185,34 @@ async def show_gallery(q, context, job_id: str, user_id: int, page: int) -> None
 async def send_result_by_id(update: Update, context, result_id: int, user_id: int) -> None:
     db: Database = context.application.bot_data["db"]
     item = await db.get_result(result_id)
+    msg = update.effective_message
     if not item:
-        await update.effective_message.reply_text("Result no longer exists.")
+        await msg.reply_text("Result no longer exists.")
         return
     job = await db.get_job(item["job_id"])
     if not job or int(job["user_id"]) != user_id:
-        await update.effective_message.reply_text("That result is not available.")
+        await msg.reply_text("That result is not available.")
         return
     path = Path(item["path"])
     try:
         validate_file(path, context.application.bot_data["config"])
     except ValidationError as exc:
-        await update.effective_message.reply_text(f"\u26a0\ufe0f Result validation failed: {exc}")
+        await msg.reply_text(f"Result validation failed: {exc}")
         return
     with path.open("rb") as fh:
-        await update.effective_message.reply_document(document=fh, filename=item["original_name"])
+        await msg.reply_document(document=fh, filename=item["original_name"])
 
 
 async def send_zip(update: Update, context, job_id: str, user_id: int) -> None:
     db: Database = context.application.bot_data["db"]
     results = await db.get_results(job_id, 100, 0)
+    msg = update.effective_message
     if not results:
-        await update.effective_message.reply_text("No results are available to archive.")
+        await msg.reply_text("No results are available to archive.")
         return
     job = await db.get_job(job_id)
     if not job or int(job["user_id"]) != user_id:
-        await update.effective_message.reply_text("Not available.")
+        await msg.reply_text("Not available.")
         return
     config: Config = context.application.bot_data["config"]
     job_dir = config.job_data_dir / job_id
@@ -228,9 +226,9 @@ async def send_zip(update: Update, context, job_id: str, user_id: int) -> None:
                 zf.write(path, arcname=safe_filename(item["original_name"]))
         validate_file(archive, config)
         with archive.open("rb") as fh:
-            await update.effective_message.reply_document(document=fh, filename=archive.name)
+            await msg.reply_document(document=fh, filename=archive.name)
     except Exception as exc:
-        await update.effective_message.reply_text(f"\u26a0\ufe0f Could not build ZIP: {exc}")
+        await msg.reply_text(f"Could not build ZIP: {exc}")
 
 
 async def start_job_from_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,7 +250,7 @@ async def start_job_from_context(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
     user = update.effective_user
     status = await context.bot.send_message(
-        chat.id, "\u23f3 <b>Queued</b>\nWaiting for a worker...", parse_mode="HTML"
+        chat.id, "<b>Queued</b>\nWaiting for a worker...", parse_mode="HTML"
     )
 
     async def runner(job: RuntimeJob, progress):
@@ -263,7 +261,7 @@ async def start_job_from_context(update: Update, context: ContextTypes.DEFAULT_T
             user.id, chat.id, op, inputs, params, status.message_id, runner
         )
     except RuntimeError as exc:
-        await status.edit_text(f"\u26a0\ufe0f {exc}")
+        await status.edit_text(str(exc))
         return
     context.user_data.clear()
     await status.edit_reply_markup(reply_markup=cancel_keyboard(job.job_id, job.user_id))
@@ -277,7 +275,7 @@ async def on_progress(job: RuntimeJob, value: int, stage: str) -> None:
         await app.bot.edit_message_text(
             chat_id=job.chat_id,
             message_id=job.message_id,
-            text=f"\u2699\ufe0f <b>Processing</b>\n\n{stage}\nProgress: {value}%",
+            text=safe_text(f"<b>Processing</b>\n\n{stage}\nProgress: {value}%"),
             parse_mode="HTML",
         )
     except TelegramError:
@@ -292,21 +290,19 @@ async def on_complete(job: RuntimeJob, results: list) -> None:
         await app.bot.edit_message_text(
             chat_id=job.chat_id,
             message_id=job.message_id,
-            text=f"\u2705 <b>Completed</b>\n\n{len(results)} result(s) ready.",
+            text=safe_text(f"<b>Completed</b>\n\n{len(results)} result(s) ready."),
             parse_mode="HTML",
         )
     except TelegramError:
         pass
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
     await app.bot.send_message(
         job.chat_id,
-        "\ud83d\udce6 <b>Results ready.</b>\nOpen the gallery to browse files.",
+        "<b>Results ready.</b>\nOpen the gallery to browse files.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("\ud83d\uddbc Open Gallery", callback_data=f"gallery:{job.job_id}:{job.user_id}:0")],
-                [InlineKeyboardButton("\ud83d\udce6 Download All", callback_data=f"result:zip:{job.job_id}:{job.user_id}")],
+                [InlineKeyboardButton("Open Gallery", callback_data=f"gallery:{job.job_id}:{job.user_id}:0")],
+                [InlineKeyboardButton("Download All", callback_data=f"result:zip:{job.job_id}:{job.user_id}")],
             ]
         ),
     )
@@ -316,7 +312,7 @@ async def on_failed(job: RuntimeJob, error: str, retryable: bool = False) -> Non
     app = getattr(on_failed, "app", None)
     if not app:
         return
-    text = f"\u274c <b>Failed</b>\n\n{error[:500]}"
+    text = safe_text(f"<b>Failed</b>\n\n{error[:500]}")
     try:
         await app.bot.edit_message_text(
             chat_id=job.chat_id,
